@@ -1,1 +1,31 @@
-# nba-pick-bot
+# Kalshi NBA Bot (Telegram + Discord)
+
+Este bot convierte tu canal de Telegram y tu canal de Discord en una central de apuestas de la NBA que se actualiza sola. Corre gratis en GitHub Actions y revisa todo cada 2 minutos aproximadamente, así que las noticias y los resultados llegan casi al momento. Usa dos fuentes públicas que no necesitan cuenta ni API key: la API de Kalshi para los precios y la API pública de ESPN para noticias, juegos y estadísticas. La de ESPN no es oficial, así que si algún día ESPN la cambia, puede que haya que ajustar `espn.py`.
+
+Todo es solo NBA. Todos los días a las 10:00 AM (hora de PR) el bot postea "Juegos de hoy": primero un resumen con cada juego del día, la hora en PR, los récords y el precio en Kalshi, y después una tarjeta por juego con las stats de los dos equipos que juegan, que incluye los últimos 5, la racha, una tabla de stats de temporada lado a lado (puntos, FG%, 3P%, rebotes, asistencias y más), los líderes de cada equipo y las lesiones. Cada 2 minutos el bot postea las noticias nuevas de la NBA con titular, resumen, foto y link. También postea el resultado final de cada juego que termina, con el ganador y el mejor jugador de cada equipo. Cuando faltan 3 horas o menos para un juego, postea un preview completo con récords, hora en PR, cancha y TV, el precio del juego en Kalshi, la línea y el over/under, la proyección de ESPN, los últimos 5 juegos de cada equipo con sus scores, los matchups anteriores entre ambos (esta temporada y la pasada), una tabla comparando las stats de temporada, los líderes de cada equipo y las lesiones importantes.
+
+Cada 30 minutos el bot edita un solo mensaje, el Live Board de Kalshi con los mercados de la NBA (juegos, spreads, totales, props y campeón), que tiene cuatro secciones: Alta Probabilidad (lados de 85¢ a 95¢ con liquidez y spread corto que cierran en menos de 48h, con lo que ganas arriesgando $10), Más Activos, Movers Hoy y Cierran Pronto. Cada día a la medianoche de PR sale un board nuevo, que en Telegram queda fijado. Además, cuando un mercado con liquidez se mueve 10¢ o más, sale una alerta aparte. Ningún pick es seguro: un contrato a 92¢ gana 8¢ y pierde 92¢ si falla, y el bot lo recuerda en cada board.
+
+La primera vez que corre, el bot no postea noticias ni finales viejos; solo los marca como vistos y desde ahí postea únicamente lo nuevo.
+
+## 1. Crear el bot de Telegram
+
+En Telegram, habla con @BotFather, envía `/newbot`, ponle nombre y copia el token que te da, que es tu `TELEGRAM_BOT_TOKEN`. Luego crea un canal (público o privado), entra a la configuración de administradores, añade tu bot como admin y dale permiso para postear, editar y fijar mensajes. Si el canal es público, el `TELEGRAM_CHAT_ID` es `@nombre_del_canal`. Si es privado, postea cualquier mensaje en el canal, abre `https://api.telegram.org/bot<TOKEN>/getUpdates` en el navegador y busca el `chat.id`, que empieza con `-100`. Si quieres un grupo para que la gente comente, ve a la configuración del canal, entra a Discussion y enlázale un grupo.
+
+## 2. Crear el webhook de Discord
+
+En tu server de Discord, crea un canal de texto como `#kalshi-board`. Ve a Edit Channel, luego Integrations, luego Webhooks, y crea uno nuevo; ahí puedes ponerle nombre y foto. Copia el Webhook URL, que es tu `DISCORD_WEBHOOK_URL`. Te recomiendo poner el canal como solo lectura para @everyone y crear otro canal `#picks-chat` para la discusión.
+
+## 3. Subirlo a GitHub
+
+Crea un repo nuevo en GitHub y sube todos estos archivos, incluyendo la carpeta `.github`. El repo **tiene que ser público**, porque el bot está prendido casi las 24 horas y eso solo es gratis sin límite en repos públicos; en uno privado se te acabarían los 2,000 minutos gratis en dos días. Los tokens no quedan expuestos porque van en Secrets, y lo único que se ve es el código y el archivo `state.json`, que solo guarda ids de mensajes y precios.
+
+En el repo, ve a Settings, luego Secrets and variables, luego Actions, y crea los secrets `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` y `DISCORD_WEBHOOK_URL`. Si solo quieres una de las dos plataformas, deja la otra sin crear y el bot la ignora.
+
+Para probarlo, ve a la pestaña Actions, abre Kalshi NBA Bot y presiona Run workflow. En un par de minutos debería salir el board en ambos canales, más los previews de los juegos que empiezan pronto. Ese turno dura 55 minutos y GitHub arranca uno nuevo cada hora, así que el bot se queda prendido solo. GitHub a veces arranca los turnos con unos minutos de atraso, así que puede haber un hueco corto de vez en cuando.
+
+## 4. Ajustar
+
+Los ajustes del board están arriba en `kalshi_board.py`: el rango de precio de Alta Probabilidad (`SAFE_MIN`, `SAFE_MAX`), la liquidez mínima (`MIN_VOL_24H`), el movimiento que dispara alertas (`MOVE_ALERT`) y cuántos picks salen por sección (`TOP_N`). Los de deportes están arriba en `espn.py`: la lista `LEAGUES` (si algún día quieres otra liga, como la NFL, añades `("football", "nfl", "NFL", "🏈", False)` y en `kalshi_board.py` añades su prefijo, como `"KXNFL"`, a `SERIES_PREFIXES`), la hora en que sale "Juegos de hoy" (`SLATE_HOUR`), cuántas horas antes sale el preview (`PREVIEW_HOURS`), cuántas noticias por liga (`NEWS_PER_LEAGUE`) y el tope de posts por corrida (`MAX_POSTS_PER_RUN`). La frecuencia se cambia con `POLL_SECONDS` en `.github/workflows/kalshi-bot.yml`, y cada cuánto se edita el board con la variable `BOARD_EVERY_MIN`. Para probar en tu PC sin postear nada, corre `pip install requests` y luego `DRY_RUN=1 python bot.py`.
+
+*No es consejo financiero. Verifica que Kalshi esté disponible donde estás y que cumples sus términos antes de operar o de cobrar por picks.*
