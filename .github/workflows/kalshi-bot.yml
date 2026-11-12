@@ -32,10 +32,13 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
+      - name: Fuentes para las tarjetas
+        run: (sudo apt-get update -qq && sudo apt-get install -y -qq fonts-inter) > /dev/null || echo "sin Inter, uso DejaVu"
       - name: Loop
         run: |
           git config user.name "kalshi-bot"
           git config user.email "kalshi-bot@users.noreply.github.com"
+          python commands.py &   # escucha /hoy, /stats, etc. durante el turno
           end=$(( $(date +%s) + SHIFT_MINUTES * 60 ))
           while [ "$(date +%s)" -lt "$end" ]; do
             python bot.py || echo "corrida falló, sigo"
