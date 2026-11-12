@@ -24,7 +24,7 @@ import players
 
 API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 MODELS = [m for m in (os.getenv("ANTHROPIC_MODEL", "").strip(), "claude-haiku-5-5", "claude-haiku-4-5") if m]
-MAX_TOKENS = 700
+MAX_TOKENS = 2000   # incluye lo que el modelo "piensa" antes de contestar
 MAX_PER_USER_DAY = int(os.getenv("AI_MAX_PER_USER_DAY", "25"))  # tope por persona para controlar el gasto
 
 SYSTEM = (
@@ -173,15 +173,26 @@ def ask(question, state):
             "messages": [{"role": "user", "content": f"CONTEXTO (JSON):\n{ctx}\n\nPREGUNTA: {question}"}]}
     headers = {"x-api-key": API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"}
     for model in MODELS:
-        r = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json={**body, "model": model}, timeout=90)
+        text = ""
+        for max_tok in (MAX_TOKENS, MAX_TOKENS * 2):  # si se corta, reintenta con más espacio
+            body["max_tokens"] = max_tok
+            r = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json={**body, "model": model}, timeout=120)
+            if r.status_code == 404 or (r.status_code == 400 and "model" in r.text.lower()) or not r.ok:
+                break
+            data = r.json()
+            u = data.get("usage") or {}
+            kinds = [b.get("type") for b in data.get("content") or []]
+            print(f"IA {model}: {u.get('input_tokens')} in / {u.get('output_tokens')} out · stop={data.get('stop_reason')} · bloques={kinds}")
+            text = "".join(b.get("text", "") for b in data.get("content") or [] if b.get("type") == "text").strip()
+            if text and data.get("stop_reason") != "max_tokens":
+                return text
+        if text:
+            return text + " …"
+        if r.ok:
+            return "Me enredé armando la respuesta 😅 Pregúntamelo más corto."
         if r.status_code == 404 or (r.status_code == 400 and "model" in r.text.lower()):
             print("Modelo no disponible:", model)
             continue
-        if not r.ok:
-            print("Anthropic error:", r.status_code, r.text[:300])
-            return "No pude contestar ahora mismo 😅 Intenta en un ratito."
-        data = r.json()
-        u = data.get("usage") or {}
-        print(f"IA {model}: {u.get('input_tokens')} in / {u.get('output_tokens')} out tokens")
-        return "".join(b.get("text", "") for b in data.get("content") or [] if b.get("type") == "text").strip()
+        print("Anthropic error:", r.status_code, r.text[:300])
+        return "No pude contestar ahora mismo 😅 Intenta en un ratito."
     return "No encontré un modelo disponible; revisa ANTHROPIC_MODEL."

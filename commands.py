@@ -244,7 +244,7 @@ def cmd_pregunta(arg, user_id=None):
     """
     if user_id is not None and not ai.allowed(user_id):
         return "Llegaste al máximo de preguntas de hoy 🙏 Mañana sigues."
-    txt = ai.ask(arg, load_state())
+    txt = ai.ask(arg, load_state()) or "No pude contestar ahora mismo 😅 Intenta en un ratito."
     return kalshi_board.md_to_tg(txt)
 
 
