@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+import cards
 import notify
 
 BASE = "https://site.api.espn.com/apis/site/v2/sports"
@@ -229,7 +230,8 @@ def team_info(c):
     rank = (c.get("curatedRank") or {}).get("current") or 99
     return {"id": str(t.get("id") or c.get("id")), "name": t.get("displayName") or "", "short": t.get("shortDisplayName") or t.get("name") or "",
             "nick": t.get("name") or "", "abbr": t.get("abbreviation") or "", "location": t.get("location") or "",
-            "logo": t.get("logo"), "record": rec, "rank": rank if rank <= 25 else None,
+            "logo": t.get("logo") or ((t.get("logos") or [{}])[0]).get("href"),
+            "color": t.get("color"), "alt": t.get("alternateColor"), "record": rec, "rank": rank if rank <= 25 else None,
             "score": score_txt(c.get("score")), "leaders": c.get("leaders") or []}
 
 
@@ -293,7 +295,7 @@ def head_to_head(sport, lg, team, opp):
     <param name="lg">Liga.</param>
     <param name="team">team_info del equipo local.</param>
     <param name="opp">team_info del rival.</param>
-    <returns>Lista de líneas, más reciente primero (máx 5).</returns>
+    <returns>Lista de dicts (date, away, as, home, hs, win, line), más reciente primero (máx 5).</returns>
     """
     cur = get(f"/{sport}/{lg}/teams/{team['id']}/schedule")
     pages = [cur]
@@ -321,8 +323,9 @@ def head_to_head(sport, lg, team, opp):
                 win = ha if float(hs) > float(as_) else aa if float(as_) > float(hs) else None
             except ValueError:
                 win = None
-            games[ev.get("id")] = (t, f"{short_date(t)} · {aa} {as_} @ {ha} {hs}" + (f" → {win}" if win else ""))
-    return [line for _, line in sorted(games.values(), key=lambda x: x[0], reverse=True)][:5]
+            games[ev.get("id")] = {"t": t, "date": short_date(t), "away": aa, "as": as_, "home": ha, "hs": hs, "win": win,
+                                   "line": f"{short_date(t)} · {aa} {as_} @ {ha} {hs}" + (f" → {win}" if win else "")}
+    return sorted(games.values(), key=lambda x: x["t"], reverse=True)[:5]
 
 
 def season_stats(summ, home, away, n=6):
@@ -415,23 +418,88 @@ def odds_line(summ, g):
     return " · ".join(parts)
 
 
-def kalshi_line(state, g):
+def _toks(t):
     """
-    <summary>Busca el precio de Kalshi del juego en el índice que guardó el board.</summary>
+    <summary>Palabras para reconocer un equipo en un título de Kalshi.</summary>
+    <param name="t">team_info.</param>
+    <returns>Set de palabras en minúscula.</returns>
+    """
+    return {x.lower() for x in (t.get("nick"), t.get("short"), t.get("location")) if x and len(x) > 2}
+
+
+def kalshi_prices(state, g):
+    """
+    <summary>Precio de Kalshi (¢) de que gane cada equipo, usando solo el mercado de ganador del juego.</summary>
     <param name="state">Estado (kx).</param>
     <param name="g">Juego.</param>
-    <returns>Texto, ej. "Pacers 68¢ · Wizards 33¢", o "".</returns>
+    <returns>{"away": ¢, "home": ¢} (vacío si no hay mercado).</returns>
     """
-    def toks(t):
-        return {x.lower() for x in (t["nick"], t["short"], t["location"]) if x and len(x) > 2}
-    ht, at = toks(g["home"]), toks(g["away"])
-    hits = []
-    for m in state.get("kx") or []:
-        title = m["t"].lower()
-        if any(x in title for x in ht) and any(x in title for x in at):
-            side = m["t"].split(" · ")[-1] if " · " in m["t"] else m["t"]
-            hits.append(f"{side} {m['p']}¢")
-    return " · ".join(list(dict.fromkeys(hits))[:3])
+    ht, at = _toks(g["home"]), _toks(g["away"])
+    found = [m for m in state.get("kx") or []
+             if any(x in m["t"].lower() for x in ht) and any(x in m["t"].lower() for x in at)]
+    winners = [m for m in found if "kxnbagame" in (m.get("u") or "").lower()] or found
+    res = {}
+    for m in winners:
+        side = m["t"].split(" · ")[-1].lower() if " · " in m["t"] else ""
+        if side and any(x in side for x in ht) and not any(x in side for x in at):
+            res.setdefault("home", m["p"])
+        elif side and any(x in side for x in at) and not any(x in side for x in ht):
+            res.setdefault("away", m["p"])
+    if "home" in res and "away" not in res:
+        res["away"] = 100 - res["home"]
+    if "away" in res and "home" not in res:
+        res["home"] = 100 - res["away"]
+    return res
+
+
+def kalshi_line(state, g):
+    """
+    <summary>Texto con el precio de Kalshi del juego, ej. "IND 68¢ · WSH 32¢".</summary>
+    <param name="state">Estado (kx).</param>
+    <param name="g">Juego.</param>
+    <returns>Texto o "".</returns>
+    """
+    p = kalshi_prices(state, g)
+    if not p:
+        return ""
+    return f"{g['away']['abbr']} {p['away']}¢ · {g['home']['abbr']} {p['home']}¢"
+
+
+def card_info(g, summ, state, h2h=None):
+    """
+    <summary>Arma los datos que necesita cards.matchup_card.</summary>
+    <param name="g">Juego.</param>
+    <param name="summ">Summary de ESPN.</param>
+    <param name="state">Estado (Kalshi).</param>
+    <param name="h2h">Matchups anteriores (opcional).</param>
+    <returns>Dict para la tarjeta.</returns>
+    """
+    form = {}
+    for t in (g["away"], g["home"]):
+        f, _ = last_five(summ, t["id"])
+        form[t["id"]] = (f.split() if f else [], team_streak(summ, t["id"]))
+    start = g.get("start")
+    when = "EN VIVO" if g.get("state") == "in" else (pr_time(start) if start else "")
+    local = start.astimezone(TZ) if start else None
+    return {"when": when, "sub": "Hora PR" + (f" · {g['broadcast']}" if g.get("broadcast") else ""),
+            "date": f"{local.day} {MESES[local.month - 1]} {local.strftime('%Y')}" if local else "",
+            "kalshi": kalshi_prices(state, g), "odds": odds_line(summ, g), "h2h": h2h or [], "form": form}
+
+
+def caption(g, state, extra=""):
+    """
+    <summary>Caption corto para la imagen de un juego.</summary>
+    <param name="g">Juego.</param>
+    <param name="state">Estado (Kalshi).</param>
+    <param name="extra">Línea adicional opcional.</param>
+    <returns>HTML.</returns>
+    """
+    a, h = g["away"], g["home"]
+    out = f"🏀 <b>{esc(a['short'])} @ {esc(h['short'])}</b>" + (f" · {pr_time(g['start'])} (PR)" if g.get("start") else "")
+    kx = kalshi_line(state, g)
+    if kx:
+        out += f"\n💹 Kalshi: {esc(kx)}"
+    return out + (f"\n{extra}" if extra else "")
 
 
 def run_previews(sport, lg, label, emoji, only_ranked, games, state, now):
@@ -456,7 +524,13 @@ def run_previews(sport, lg, label, emoji, only_ranked, games, state, now):
         if not can_post():
             return
         summ = get(f"/{sport}/{lg}/summary", {"event": g["id"]})
-        notify.post(*build_preview(label, emoji, g, summ, head_to_head(sport, lg, g["home"], g["away"]), state, hrs))
+        h2h = head_to_head(sport, lg, g["home"], g["away"])
+        try:
+            png = cards.matchup_card("PREVIEW", g, summ, card_info(g, summ, state, h2h))
+            notify.post_photo(png, caption(g, state, "<i>Arranca en menos de 3 horas</i>"))
+        except Exception as e:  # si la imagen falla, manda la versión en texto
+            print("Card preview error:", repr(e))
+            notify.post(*build_preview(label, emoji, g, summ, h2h, state, hrs))
         done.append(g["id"])
     state["previewed"] = done[-500:]
 
@@ -468,7 +542,7 @@ def build_preview(label, emoji, g, summ, h2h, state, hrs):
     <param name="emoji">Emoji.</param>
     <param name="g">Juego.</param>
     <param name="summ">Summary de ESPN.</param>
-    <param name="h2h">Líneas de matchups anteriores.</param>
+    <param name="h2h">Matchups anteriores (de head_to_head).</param>
     <param name="state">Estado (para el precio de Kalshi).</param>
     <param name="hrs">Horas para el juego.</param>
     <returns>(html de Telegram, payload de Discord).</returns>
@@ -505,7 +579,7 @@ def build_preview(label, emoji, g, summ, h2h, state, hrs):
                 t.append(f"<b>{esc(team['abbr'])}</b>  <code>{esc(form)}</code>")
                 t += [f"   {esc(x)}" for x in lines]
     t.append("\n🆚 <b>MATCHUPS ANTERIORES</b>")
-    t += [f"   {esc(x)}" for x in h2h] or ["   <i>No se han enfrentado recientemente</i>"]
+    t += [f"   {esc(x['line'])}" for x in h2h] or ["   <i>No se han enfrentado recientemente</i>"]
     if stats:
         t.append("\n📊 <b>STATS DE TEMPORADA</b>")
         t.append(f"<pre>{esc(stats)}</pre>")
@@ -522,7 +596,7 @@ def build_preview(label, emoji, g, summ, h2h, state, hrs):
     for team, form, lines in ((a, fa, la), (h, fh, lh)):
         if lines:
             fields.append({"name": f"📅 Últimos 5 · {team['abbr']}  `{form}`", "value": clip("\n".join(lines), 1024), "inline": True})
-    fields.append({"name": "🆚 Matchups anteriores", "value": clip("\n".join(h2h) or "*No se han enfrentado recientemente*", 1024), "inline": False})
+    fields.append({"name": "🆚 Matchups anteriores", "value": clip("\n".join(x["line"] for x in h2h) or "*No se han enfrentado recientemente*", 1024), "inline": False})
     if stats:
         fields.append({"name": "📊 Stats de temporada", "value": clip(f"```\n{stats}\n```", 1024), "inline": False})
     if leaders:
@@ -556,7 +630,14 @@ def run_finals(lg, label, emoji, only_ranked, games, state):
         if lg in init:
             if not can_post():
                 break
-            post_final(label, emoji, g)
+            try:
+                local = (g.get("start") or dt.datetime.now(dt.timezone.utc)).astimezone(TZ)
+                png = cards.final_card(g, f"{local.day} {MESES[local.month - 1]} {local.strftime('%Y')}")
+                a, h = g["away"], g["home"]
+                notify.post_photo(png, f"✅ <b>FINAL</b> · {esc(a['short'])} {a['score']} – {h['score']} {esc(h['short'])}")
+            except Exception as e:
+                print("Card final error:", repr(e))
+                post_final(label, emoji, g)
         posted.append(g["id"])
     if lg not in init:
         init.append(lg)
@@ -634,29 +715,31 @@ def run_slate(sport, lg, label, emoji, state, now):
     if not games:
         return
 
-    # Mensaje 1: el resumen del día
-    rows_tg, rows_dc = [], []
+    date_txt = f"{local.day} {MESES[local.month - 1]} {local.strftime('%Y')}"
     for g in games:
-        a, h = g["away"], g["home"]
-        kx = kalshi_line(state, g)
-        base = f"{pr_time(g['start'])} · {a['abbr']} ({a['record']}) @ {h['abbr']} ({h['record']})"
-        rows_tg.append(f"🕖 <b>{esc(base)}</b>" + (f"\n      💹 {esc(kx)}" if kx else ""))
-        rows_dc.append(f"🕖 **{base}**" + (f"\n┗ 💹 {kx}" if kx else ""))
-    title = f"🗓️ JUEGOS DE HOY · {label} · {local.day} {MESES[local.month - 1]}"
-    notify.post(f"{emoji} <b>{title}</b>\n<i>{len(games)} juego{'s' if len(games) != 1 else ''} · horas en PR · stats de cada juego abajo 👇</i>\n\n"
-                + "\n".join(rows_tg),
-                {"embeds": [{"title": f"{emoji} {title}", "description": clip("\n".join(rows_dc), 4000),
-                             "color": COLORS.get(label, 0x111827),
-                             "footer": {"text": f"{len(games)} juego{'s' if len(games) != 1 else ''} · horas en PR · stats de cada juego abajo"}}]})
-
-    # Mensajes 2..n: stats de los dos equipos de cada juego
-    for g in games:
-        try:
+        g["when_short"] = pr_time(g["start"])
+    n = len(games)
+    try:
+        # Imagen 1: resumen del día
+        notify.post_photo(cards.slate_card(games, date_txt, lambda g: kalshi_prices(state, g)),
+                          f"{emoji} <b>JUEGOS DE HOY</b> · {n} juego{'s' if n != 1 else ''} · horas en PR\n"
+                          "<i>Las stats de cada juego van abajo 👇</i>",
+                          f"**{emoji} JUEGOS DE HOY** · {n} juego{'s' if n != 1 else ''}")
+        # Álbum: una tarjeta de stats por juego
+        imgs = []
+        for g in games:
+            try:
+                summ = get(f"/{sport}/{lg}/summary", {"event": g["id"]})
+                imgs.append(cards.matchup_card("JUEGOS DE HOY", g, summ, card_info(g, summ, state)))
+            except Exception as e:
+                print("Card slate error:", g["id"], repr(e))
+        notify.post_album(imgs, "📊 <b>Stats de cada juego</b> · desliza para verlos todos", "📊 **Stats de cada juego**")
+    except Exception as e:  # si las imágenes fallan, manda la versión en texto
+        print("Slate imágenes error:", repr(e))
+        for g in games:
             summ = get(f"/{sport}/{lg}/summary", {"event": g["id"]})
             notify.post(*build_team_card(label, emoji, g, summ, state))
-            time.sleep(2)  # Telegram permite ~20 mensajes por minuto en un canal
-        except Exception as e:
-            print("Slate error:", g["id"], repr(e))
+            time.sleep(2)
 
 
 def build_team_card(label, emoji, g, summ, state):

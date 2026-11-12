@@ -17,6 +17,7 @@ import os
 import sys
 import time
 
+import cards
 import espn
 import kalshi_board
 import notify
@@ -182,6 +183,12 @@ def cmd_stats(arg):
     g, summ = next_game(team)
     if not g:
         return f"No encontré el próximo juego de {espn.esc(team.get('displayName'))}."
+    try:
+        me = g["home"] if g["home"]["id"] == str(team.get("id")) else g["away"]
+        png = cards.matchup_card(f"STATS · {me['abbr']}", g, summ, espn.card_info(g, summ, load_state()))
+        return ("photo", png, espn.caption(g, load_state(), f"📊 Stats de <b>{espn.esc(me['name'])}</b> y su próximo rival"))
+    except Exception as e:
+        print("Card stats error:", repr(e))
     me, opp = (g["home"], g["away"]) if g["home"]["id"] == str(team.get("id")) else (g["away"], g["home"])
     form, l5 = espn.last_five(summ, me["id"])
     streak = espn.team_streak(summ, me["id"])
@@ -222,6 +229,11 @@ def cmd_juego(arg):
         return f"No encontré el próximo juego de {espn.esc(team.get('displayName'))}."
     hrs = (g["start"] - dt.datetime.now(dt.timezone.utc)).total_seconds() / 3600 if g["start"] else 0
     h2h = espn.head_to_head(SPORT, LG, g["home"], g["away"])
+    try:
+        png = cards.matchup_card("PREVIEW", g, summ, espn.card_info(g, summ, load_state(), h2h))
+        return ("photo", png, espn.caption(g, load_state()))
+    except Exception as e:
+        print("Card juego error:", repr(e))
     tg_html, _ = espn.build_preview(LABEL, EMOJI, g, summ, h2h, load_state(), hrs)
     return tg_html
 
@@ -276,7 +288,7 @@ def answer(text):
     """
     <summary>Interpreta un mensaje y devuelve la respuesta, o None si no es un comando nuestro.</summary>
     <param name="text">Texto del mensaje.</param>
-    <returns>HTML o None.</returns>
+    <returns>HTML, ("photo", png, caption) o None.</returns>
     """
     if not text or not text.startswith("/"):
         return None
@@ -296,11 +308,15 @@ def answer(text):
 
 def reply(chat_id, msg_id, html_text):
     """
-    <summary>Contesta en el mismo chat, partiendo mensajes largos (límite 4096).</summary>
+    <summary>Contesta en el mismo chat: imagen con caption, o texto partido en mensajes de máx 4096.</summary>
     <param name="chat_id">Chat donde llegó el comando.</param>
     <param name="msg_id">Mensaje a responder.</param>
-    <param name="html_text">Respuesta en HTML.</param>
+    <param name="html_text">Respuesta en HTML, o ("photo", png, caption).</param>
     """
+    if isinstance(html_text, tuple):
+        _, png, cap = html_text
+        notify.send_photo(chat_id, png, cap, reply_to=msg_id)
+        return
     chunks, cur = [], ""
     for line in html_text.split("\n"):
         if len(cur) + len(line) + 1 > 3900:
@@ -356,6 +372,10 @@ def listen():
 
 if __name__ == "__main__":
     if len(sys.argv) > 2 and sys.argv[1] == "--test":
-        print(answer(sys.argv[2]))
+        out = answer(sys.argv[2])
+        if isinstance(out, tuple):
+            notify._dry_save([out[1]], out[2])
+        else:
+            print(out)
     else:
         listen()
