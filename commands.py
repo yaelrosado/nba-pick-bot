@@ -17,30 +17,29 @@ import os
 import sys
 import time
 
+import ai
 import cards
 import espn
 import kalshi_board
 import notify
+import players
 
 SHIFT_MINUTES = int(os.getenv("SHIFT_MINUTES", "55"))
 STATE_FILE = os.getenv("STATE_FILE", "state.json")
 MAX_AGE_MIN = 10  # ignora comandos más viejos que esto (los que llegaron entre turnos)
 SPORT, LG, LABEL, EMOJI = "basketball", "nba", "NBA", "🏀"
 
-ALIASES = {"sixers": "PHI", "76ers": "PHI", "blazers": "POR", "wolves": "MIN", "cavs": "CLE", "mavs": "DAL",
-           "dubs": "GS", "warriors": "GS", "clips": "LAC", "lakers": "LAL", "knicks": "NY", "nets": "BKN",
-           "spurs": "SA", "pels": "NO", "suns": "PHX", "thunder": "OKC", "okc": "OKC", "nuggets": "DEN",
-           "jazz": "UTAH", "wizards": "WSH", "celtics": "BOS", "heat": "MIA", "bucks": "MIL", "bulls": "CHI"}
 
 HELP = (f"{EMOJI} <b>COMANDOS DEL BOT</b>\n\n"
         "/hoy — juegos de hoy, hora en PR y precio en Kalshi\n"
         "/stats <i>equipo</i> — stats de temporada, forma, líderes y lesiones\n"
         "/juego <i>equipo</i> — preview del próximo juego con matchups anteriores\n"
         "/kalshi <i>equipo</i> — precios de Kalshi de ese equipo\n"
-        "/picks — los de alta probabilidad ahora mismo\n\n"
-        "<i>Ej: /stats lakers · /juego celtics · /kalshi knicks</i>")
+        "/jugador <i>nombre</i> — foto, promedios y últimos 5 juegos con stats\n"
+        "/picks — los de alta probabilidad ahora mismo\n"
+        "/pregunta <i>lo que sea</i> — pregúntale a la IA (o menciona al bot o respóndele)\n\n"
+        "<i>Ej: /jugador flagg · /juego celtics · /pregunta ¿quién tiene ventaja hoy, Knicks o Bucks?</i>")
 
-_cache = {}
 
 
 # ---------------------------------------------------------------- Helpers ----
@@ -56,81 +55,7 @@ def load_state():
         return {}
 
 
-def cached(key, seconds, fn):
-    """
-    <summary>Cache sencillo en memoria para no repetir llamadas pesadas.</summary>
-    <param name="key">Llave del cache.</param>
-    <param name="seconds">Vida del valor.</param>
-    <param name="fn">Función que produce el valor.</param>
-    <returns>El valor (del cache o nuevo).</returns>
-    """
-    hit = _cache.get(key)
-    if hit and time.time() - hit[0] < seconds:
-        return hit[1]
-    val = fn()
-    _cache[key] = (time.time(), val)
-    return val
-
-
-def nba_teams():
-    """
-    <summary>Lista de equipos de la NBA (cache 6h).</summary>
-    <returns>Lista de dicts de equipo de ESPN.</returns>
-    """
-    def load():
-        data = espn.get(f"/{SPORT}/{LG}/teams")
-        lgs = ((data.get("sports") or [{}])[0].get("leagues") or [{}])[0]
-        return [t.get("team") or {} for t in lgs.get("teams") or []]
-    return cached("teams", 6 * 3600, load)
-
-
-def find_team(query):
-    """
-    <summary>Busca un equipo por nombre, ciudad, abreviatura o apodo.</summary>
-    <param name="query">Texto del usuario, ej. "lakers", "LAL", "los angeles lakers".</param>
-    <returns>Dict del equipo o None.</returns>
-    """
-    q = query.strip().lower()
-    if not q:
-        return None
-    teams = nba_teams()
-    ab = ALIASES.get(q, q.upper())
-    for t in teams:
-        if (t.get("abbreviation") or "").upper() == ab:
-            return t
-    for t in teams:
-        names = [t.get(k) or "" for k in ("name", "shortDisplayName", "displayName", "location", "nickname")]
-        if any(q == n.lower() for n in names):
-            return t
-    for t in teams:
-        if q in (t.get("displayName") or "").lower():
-            return t
-    return None
-
-
-def next_game(team):
-    """
-    <summary>Busca el próximo juego (o el de hoy) del equipo y su summary.</summary>
-    <param name="team">Dict del equipo de ESPN.</param>
-    <returns>(juego normalizado, summary) o (None, None).</returns>
-    """
-    tid = str(team.get("id"))
-    info = espn.get(f"/{SPORT}/{LG}/teams/{tid}").get("team") or {}
-    ev_id = str(((info.get("nextEvent") or [{}])[0]).get("id") or "")
-    if not ev_id:
-        now = dt.datetime.now(dt.timezone.utc)
-        for ev in espn.get(f"/{SPORT}/{LG}/teams/{tid}/schedule").get("events") or []:
-            comp = (ev.get("competitions") or [{}])[0]
-            t = espn.parse_time(ev.get("date"))
-            if t and not ((comp.get("status") or {}).get("type") or {}).get("completed") and t > now - dt.timedelta(hours=4):
-                ev_id = str(ev.get("id"))
-                break
-    if not ev_id:
-        return None, None
-    summ = espn.get(f"/{SPORT}/{LG}/summary", {"event": ev_id})
-    comp = ((summ.get("header") or {}).get("competitions") or [{}])[0]
-    g = espn.game_info({"id": ev_id, "date": comp.get("date"), "competitions": [comp]})
-    return g, summ
+cached, nba_teams, find_team, next_game = players.cached, players.nba_teams, players.find_team, players.next_game
 
 
 def team_lines(team_abbr, lines):
@@ -248,8 +173,7 @@ def cmd_kalshi(arg):
     if not team:
         return "No encontré ese equipo. Ej: <code>/kalshi knicks</code>"
     toks = {x.lower() for x in (team.get("name"), team.get("shortDisplayName"), team.get("location")) if x and len(x) > 2}
-    markets = cached("kx_markets", 120, lambda: kalshi_board.sports_markets(
-        kalshi_board.fetch_events(), dt.datetime.now(dt.timezone.utc)))
+    markets = ai.kalshi_markets()
     hits = sorted((m for m in markets if any(t in m["name"].lower() for t in toks)), key=lambda m: -m["vol24"])[:12]
     if not hits:
         return f"No hay mercados abiertos de {espn.esc(team.get('displayName'))} en Kalshi ahora mismo."
@@ -267,8 +191,7 @@ def cmd_picks(_arg):
     <param name="_arg">No se usa.</param>
     <returns>HTML.</returns>
     """
-    markets = cached("kx_markets", 120, lambda: kalshi_board.sports_markets(
-        kalshi_board.fetch_events(), dt.datetime.now(dt.timezone.utc)))
+    markets = ai.kalshi_markets()
     picks = kalshi_board.high_prob(markets)
     if not picks:
         return "🔒 Ahora mismo no hay picks que cumplan el filtro (85–95¢, líquidos, cierran en &lt;48h)."
@@ -280,26 +203,85 @@ def cmd_picks(_arg):
     return "\n".join(out)
 
 
-COMMANDS = {"hoy": cmd_hoy, "stats": cmd_stats, "juego": cmd_juego, "kalshi": cmd_kalshi, "picks": cmd_picks,
+def cmd_jugador(arg):
+    """
+    <summary>Tarjeta de un jugador: foto, promedios de temporada, últimos 5 juegos con stats y props de Kalshi.</summary>
+    <param name="arg">Nombre del jugador.</param>
+    <returns>("photo", png, caption) o HTML.</returns>
+    """
+    p = players.find_player(arg)
+    if not p:
+        return "No encontré ese jugador. Ej: <code>/jugador brunson</code>"
+    avg = players.player_overview(p["id"])
+    rows = players.player_last5(p)
+    props = []
+    try:
+        last = p["last"].lower()
+        for m in sorted((m for m in ai.kalshi_markets() if last and last in m["name"].lower() and m["mid"] is not None),
+                        key=lambda m: -m["vol24"])[:5]:
+            props.append((m["name"], round(m["mid"])))
+    except Exception as e:
+        print("Props error:", repr(e))
+    team = (p.get("team") or {}).get("abbreviation", "")
+    cap = f"🏀 <b>{espn.esc(p['name'])}</b> · {espn.esc(team)}"
+    if avg.get("PTS"):
+        cap += f"\n{avg.get('PTS')} PTS · {avg.get('REB', '-')} REB · {avg.get('AST', '-')} AST por juego"
+    try:
+        return ("photo", cards.player_card(p, avg, rows, props), cap)
+    except Exception as e:
+        print("Card jugador error:", repr(e))
+    lines = [cap, ""] + [f"{r['date']} {r['atvs']} {r['opp']} {r['res']} {r['score']}: {r['PTS']} PTS, {r['REB']} REB, {r['AST']} AST"
+                         for r in rows]
+    return "\n".join(espn.esc(x) if i > 1 else x for i, x in enumerate(lines))
+
+
+def cmd_pregunta(arg, user_id=None):
+    """
+    <summary>Pregunta libre a la IA con data en vivo.</summary>
+    <param name="arg">Pregunta.</param>
+    <param name="user_id">Id de quien pregunta (para el tope diario).</param>
+    <returns>HTML.</returns>
+    """
+    if user_id is not None and not ai.allowed(user_id):
+        return "Llegaste al máximo de preguntas de hoy 🙏 Mañana sigues."
+    txt = ai.ask(arg, load_state())
+    return kalshi_board.md_to_tg(txt)
+
+
+COMMANDS = {"hoy": cmd_hoy, "stats": cmd_stats, "juego": cmd_juego, "kalshi": cmd_kalshi, "picks": cmd_picks, "jugador": cmd_jugador, "pregunta": cmd_pregunta, "p": cmd_pregunta,
             "ayuda": lambda _a: HELP, "help": lambda _a: HELP, "start": lambda _a: HELP}
 
 
-def answer(text):
+EXAMPLES = {"stats": "lakers", "juego": "celtics", "kalshi": "knicks", "jugador": "brunson",
+            "pregunta": "¿quién tiene ventaja hoy?", "p": "¿quién tiene ventaja hoy?"}
+
+
+def answer(text, user_id=None, bot_username=""):
     """
-    <summary>Interpreta un mensaje y devuelve la respuesta, o None si no es un comando nuestro.</summary>
+    <summary>Interpreta un mensaje y devuelve la respuesta, o None si no es para el bot.</summary>
     <param name="text">Texto del mensaje.</param>
+    <param name="user_id">Id de quien escribe.</param>
+    <param name="bot_username">@ del bot (si lo mencionan, cuenta como /pregunta).</param>
     <returns>HTML, ("photo", png, caption) o None.</returns>
     """
-    if not text or not text.startswith("/"):
+    if not text:
+        return None
+    mention = f"@{bot_username}".lower() if bot_username else ""
+    if not text.startswith("/"):
+        if mention and mention in text.lower():
+            q = text.lower().replace(mention, "").strip() or text
+            return cmd_pregunta(q, user_id)
         return None
     parts = text.strip().split(maxsplit=1)
     cmd = parts[0][1:].split("@")[0].lower()
     fn = COMMANDS.get(cmd)
     if not fn:
         return None
-    if cmd in ("stats", "juego", "kalshi") and len(parts) < 2:
-        return f"Dime el equipo. Ej: <code>/{cmd} lakers</code>"
+    if cmd in EXAMPLES and len(parts) < 2:
+        return f"Te faltó decirme qué. Ej: <code>/{cmd} {EXAMPLES[cmd]}</code>"
     try:
+        if fn is cmd_pregunta:
+            return fn(parts[1], user_id)
         return fn(parts[1] if len(parts) > 1 else "")
     except Exception as e:
         print("Comando error:", cmd, repr(e))
@@ -346,10 +328,18 @@ def listen():
         {"command": "stats", "description": "Stats de un equipo (ej. /stats lakers)"},
         {"command": "juego", "description": "Preview del próximo juego (ej. /juego celtics)"},
         {"command": "kalshi", "description": "Precios de Kalshi de un equipo"},
+        {"command": "jugador", "description": "Stats de un jugador (ej. /jugador brunson)"},
+        {"command": "pregunta", "description": "Pregúntale a la IA (ej. /pregunta ¿quién gana hoy?)"},
         {"command": "picks", "description": "Picks de alta probabilidad ahora"},
         {"command": "ayuda", "description": "Lista de comandos"}]})
+    me = notify.tg("getMe", {}).get("result") or {}
+    bot_username, bot_id = me.get("username", ""), me.get("id")
     end, offset = time.time() + SHIFT_MINUTES * 60, None
     print("Escuchando comandos…")
+    try:
+        players.roster_index()  # precarga los rosters para que /jugador conteste rápido
+    except Exception as e:
+        print("Roster error:", repr(e))
     while time.time() < end:
         try:
             params = {"timeout": 25, "allowed_updates": ["message"]}
@@ -361,7 +351,15 @@ def listen():
                 m = u.get("message") or {}
                 if time.time() - m.get("date", 0) > MAX_AGE_MIN * 60:
                     continue
-                out = answer(m.get("text") or "")
+                text = m.get("text") or ""
+                uid = (m.get("from") or {}).get("id")
+                to_bot = ((m.get("reply_to_message") or {}).get("from") or {}).get("id") == bot_id
+                if to_bot and text and not text.startswith("/"):
+                    text = f"/pregunta {text}"  # responderle al bot = preguntarle
+                is_ai = text.startswith(("/pregunta", "/p ")) or (bot_username and f"@{bot_username}".lower() in text.lower() and not text.startswith("/"))
+                if is_ai:
+                    notify.tg("sendChatAction", {"chat_id": m["chat"]["id"], "action": "typing"})
+                out = answer(text, uid, bot_username)
                 if out:
                     print("Comando:", (m.get("text") or "")[:40])
                     reply(m["chat"]["id"], m["message_id"], out)

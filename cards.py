@@ -151,6 +151,47 @@ def logo(t, size):
     return im
 
 
+def headshot(url, size, fallback_text="?"):
+    """
+    <summary>Foto del jugador recortada en círculo (cache). Si falla, un círculo gris con iniciales.</summary>
+    <param name="url">URL del headshot de ESPN.</param>
+    <param name="size">Tamaño en unidades.</param>
+    <param name="fallback_text">Iniciales si no hay foto.</param>
+    <returns>Imagen RGBA.</returns>
+    """
+    px = U(size)
+    if url and url not in _logos:
+        try:
+            r = requests.get(url, timeout=10)
+            r.raise_for_status()
+            _logos[url] = Image.open(io.BytesIO(r.content)).convert("RGBA")
+        except Exception:
+            _logos[url] = None
+    src = _logos.get(url) if url else None
+    base = Image.new("RGBA", (px, px), (0, 0, 0, 0))
+    mask = Image.new("L", (px, px), 0)
+    ImageDraw.Draw(mask).ellipse([0, 0, px - 1, px - 1], fill=255)
+    bg = Image.new("RGBA", (px, px), hex_rgb("#E2E8F0") + (255,))
+    if src is not None:
+        w, h = src.size
+        side = min(w, h)
+        crop = src.crop(((w - side) // 2, 0, (w + side) // 2, side)).resize((px, px), Image.LANCZOS)
+        bg.alpha_composite(crop)
+    else:
+        ImageDraw.Draw(bg).text((px / 2, px / 2), fallback_text, font=font("black", size * 0.32), fill=MUTED, anchor="mm")
+    base.paste(bg, (0, 0), mask)
+    return base
+
+
+def initials(name):
+    """
+    <summary>Iniciales de un nombre, ej. "Cooper Flagg" -> "CF".</summary>
+    <param name="name">Nombre.</param>
+    <returns>Texto.</returns>
+    """
+    return "".join(w[0] for w in str(name or "?").replace(".", " ").split()[:2]).upper() or "?"
+
+
 def fit(d, text, f, maxw):
     """
     <summary>Corta texto con "…" para que quepa en maxw.</summary>
@@ -211,7 +252,7 @@ class Card:
     <summary>Lienzo alto que se recorta al final; las secciones se dibujan de arriba hacia abajo.</summary>
     """
 
-    def __init__(self, max_h=2600):
+    def __init__(self, max_h=4400):
         """
         <summary>Crea el lienzo.</summary>
         <param name="max_h">Altura máxima en unidades.</param>
@@ -230,6 +271,8 @@ class Card:
         <param name="fill">Color.</param>
         <param name="anchor">Ancla de PIL (la, mm, rm, lm…).</param>
         """
+        if isinstance(fill, tuple) and (0.299 * fill[0] + 0.587 * fill[1] + 0.114 * fill[2]) / 255 > 0.55:
+            fill = tuple(int(v * 0.62) for v in fill)  # colores claros (ej. amarillo) se oscurecen para que se lean
         self.d.text((U(x), U(y)), str(s), font=f, fill=fill, anchor=anchor)
 
     def rr(self, x0, y0, x1, y1, r, fill=None, outline=None, width=1):
@@ -413,19 +456,30 @@ def matchup_card(kind, g, summ, info):
     if info.get("odds"):
         c.t(W / 2, yy + 8, fit(c.d, info["odds"], font("semibold", 22), 900), font("semibold", 22), MUTED, "mm")
 
-    # --- Forma
-    y = c.section(150, "FORMA · ÚLTIMOS 5")
-    for t, x in ((a, 60), (h, 560)):
-        res, _ = info.get("form", {}).get(t["id"], ([], ""))
-        c.t(x, y + 30, t["abbr"], font("black", 26), INK, "lm")
-        px = x + 100
-        for r in (res or [])[:5]:
-            col = WIN if r == "W" else LOSS if r == "L" else GREY_BAR
-            c.rr(px, y + 10, px + 58, y + 50, 10, fill=col)
-            c.t(px + 29, y + 30, r, font("black", 22), "white", "mm")
-            px += 66
-        if not res:
-            c.t(px, y + 30, "Sin data", font("medium", 22), MUTED, "lm")
+    # --- Últimos 5 (con mejor jugador de cada juego)
+    for t, col in ((a, ca), (h, ch)):
+        d5 = (info.get("last5") or {}).get(t["id"])
+        if not d5 or not d5.get("rows"):
+            continue
+        rows5 = d5["rows"][:5]
+        y = c.section(70 + len(rows5) * 52 + 12, f"ÚLTIMOS 5 · {t['abbr']}")
+        c.t(W - 60, y - 32, f"{d5['record']}  ·  {d5['avg_for']:.1f} anotados  ·  {d5['avg_against']:.1f} permitidos",
+            font("semibold", 20), MUTED, "rm")
+        for i, r in enumerate(rows5):
+            cy = y + 22 + i * 52
+            c.t(60, cy, r["date"], font("medium", 20), MUTED, "lm")
+            c.t(180, cy, f"{'vs' if r['atvs'] == 'vs' else '@'} {r['opp']}", font("bold", 23), INK, "lm")
+            chip = WIN if r["res"] == "W" else LOSS if r["res"] == "L" else GREY_BAR
+            c.rr(300, cy - 17, 344, cy + 17, 9, fill=chip)
+            c.t(322, cy, r["res"], font("black", 20), "white", "mm")
+            c.t(362, cy, f"{r['for']}-{r['against']}", font("black", 24), INK, "lm")
+            tp = r.get("top")
+            if tp:
+                name = fit(c.d, tp["name"], font("semibold", 22), 210)
+                c.t(500, cy, name, font("semibold", 22), INK, "lm")
+                c.t(W - 60, cy, f"{tp['pts']} PTS · {tp['reb']} REB · {tp['ast']} AST", font("bold", 20), col, "rm")
+            if i < len(rows5) - 1:
+                c.d.line([U(60), U(cy + 26), U(W - 60), U(cy + 26)], fill=LINE, width=U(1))
 
     # --- Stats
     sa, sh = team_stats(summ, a["id"]), team_stats(summ, h["id"])
@@ -459,18 +513,56 @@ def matchup_card(kind, g, summ, info):
                 c.d.line([U(60), U(y + 58), U(W - 60), U(y + 58)], fill=LINE, width=U(1))
             y += 58
 
-    # --- Líderes
-    la_, lh_ = team_leaders(summ, a), team_leaders(summ, h)
-    if la_ or lh_:
-        n = max(len(la_), len(lh_))
-        y = c.section(70 + n * 46 + 14, "LÍDERES")
-        for lst, x in ((la_, 60), (lh_, 560)):
-            for i, (cat, name, val) in enumerate(lst):
-                cy = y + 20 + i * 46
-                c.rr(x, cy - 15, x + 62, cy + 15, 8, fill="#F1F5F9")
-                c.t(x + 31, cy, cat, font("bold", 17), MUTED, "mm")
-                c.t(x + 76, cy, fit(c.d, name, font("semibold", 24), 260), font("semibold", 24), INK, "lm")
-                c.t(x + 460, cy, val, font("black", 24), INK, "rm")
+    # --- Jugadores clave (foto + promedios de temporada)
+    kp = info.get("players") or {}
+    pa_, ph_ = kp.get(a["id"]) or [], kp.get(h["id"]) or []
+    if pa_ or ph_:
+        n = max(len(pa_), len(ph_))
+        y = c.section(70 + 34 + n * 100 + 6, "JUGADORES CLAVE")
+        for lst, x, t, col in ((pa_, 60, a, ca), (ph_, 560, h, ch)):
+            c.t(x, y + 10, t["abbr"], font("black", 22), col, "lm")
+            for i, pl in enumerate(lst):
+                cy = y + 80 + i * 100
+                c.paste(headshot(pl.get("headshot"), 80, initials(pl.get("name"))), x + 40, cy)
+                nm = pl.get("short") or pl.get("name")
+                c.t(x + 96, cy - 18, fit(c.d, f"{nm}" + (f" · {pl['pos']}" if pl.get("pos") else ""), font("bold", 23), 360),
+                    font("bold", 23), INK, "lm")
+                av = pl.get("avg") or {}
+                line1 = "  ·  ".join(f"{av[k]} {lbl}" for k, lbl in (("PTS", "PTS"), ("REB", "REB"), ("AST", "AST")) if av.get(k))
+                line2 = "  ·  ".join(f"{lbl} {av[k]}{'%' if '%' in k else ''}" for k, lbl in (("FG%", "FG"), ("3P%", "3P"), ("MIN", "MIN")) if av.get(k))
+                c.t(x + 96, cy + 12, line1 or "Sin promedios", font("black", 20), col, "lm")
+                if line2:
+                    c.t(x + 96, cy + 38, line2, font("medium", 18), MUTED, "lm")
+
+    # --- Líderes del equipo (puntos, triples, rebotes, asistencias por juego)
+    tl = info.get("team_leaders") or {}
+    la_, lh_ = tl.get(a["id"]) or {}, tl.get(h["id"]) or {}
+    cats = [(key, lbl) for key, lbl in (("PTS", "PUNTOS POR JUEGO"), ("3PM", "TRIPLES POR JUEGO"),
+                                       ("REB", "REBOTES POR JUEGO"), ("AST", "ASISTENCIAS POR JUEGO"))
+            if la_.get(key) or lh_.get(key)]
+    if cats:
+        y = c.section(70 + 30 + len(cats) * 118, "LÍDERES DEL EQUIPO")
+        c.t(60, y + 6, a["abbr"], font("black", 22), ca, "lm")
+        c.t(560, y + 6, h["abbr"], font("black", 22), ch, "lm")
+        y += 30
+        for i, (key, lbl) in enumerate(cats):
+            yb = y + i * 118
+            c.rr(W / 2 - 130, yb + 2, W / 2 + 130, yb + 30, 14, fill="#F1F5F9")
+            c.t(W / 2, yb + 16, lbl, font("bold", 17), MUTED, "mm")
+            for lst, x, col in ((la_.get(key) or [], 60, ca), (lh_.get(key) or [], 560, ch)):
+                if not lst:
+                    c.t(x, yb + 70, "Sin data", font("medium", 20), MUTED, "lm")
+                    continue
+                top = lst[0]
+                c.paste(headshot(top.get("headshot"), 60, initials(top.get("name"))), x + 30, yb + 70)
+                c.t(x + 74, yb + 58, fit(c.d, top.get("short") or top.get("name"), font("bold", 23), 250),
+                    font("bold", 23), INK, "lm")
+                rest = "  ·  ".join(f"{p.get('short')} {p.get('value')}" for p in lst[1:3])
+                if rest:
+                    c.t(x + 74, yb + 86, fit(c.d, rest, font("medium", 17), 300), font("medium", 17), MUTED, "lm")
+                c.t(x + 460, yb + 64, top.get("value") or "-", font("black", 36), col, "rm")
+            if i < len(cats) - 1:
+                c.d.line([U(60), U(yb + 112), U(W - 60), U(yb + 112)], fill=LINE, width=U(1))
 
     # --- Lesiones
     cols = []
@@ -567,5 +659,81 @@ def slate_card(games, date_txt, kalshi_of):
             c.t(W - 60, cy + 22, txt, font("bold", 20), team_color(fav), "rm")
         elif g.get("broadcast"):
             c.t(W - 60, cy + 22, g["broadcast"], font("medium", 20), MUTED, "rm")
+    c.footer()
+    return c.png()
+
+
+def player_card(p, avg, rows, props=None):
+    """
+    <summary>Tarjeta de un jugador: foto, equipo, promedios de temporada, últimos 5 juegos y props de Kalshi.</summary>
+    <param name="p">Jugador (players.roster_index).</param>
+    <param name="avg">Promedios de temporada {PTS, REB, …}.</param>
+    <param name="rows">Últimos 5 (players.player_last5).</param>
+    <param name="props">Líneas de Kalshi [(texto, ¢)] opcional.</param>
+    <returns>bytes PNG.</returns>
+    """
+    team = p.get("team") or {}
+    tinfo = {"color": team.get("color"), "alt": team.get("alternateColor"), "abbr": team.get("abbreviation", ""),
+             "logo": ((team.get("logos") or [{}])[0]).get("href")}
+    col = team_color(tinfo)
+    c = Card()
+    c.header("JUGADOR", team.get("displayName", ""))
+
+    y = c.section(250)
+    c.paste(headshot(p.get("headshot"), 190, initials(p.get("name"))), 160, y + 125)
+    c.t(285, y + 82, fit(c.d, p.get("name"), font("black", 44), 640), font("black", 44), INK, "lm")
+    sub = " · ".join(x for x in (f"#{p['jersey']}" if p.get("jersey") else "", p.get("pos"), team.get("displayName")) if x)
+    c.t(285, y + 128, sub, font("medium", 24), MUTED, "lm")
+    if p.get("injury"):
+        c.rr(285, y + 158, 285 + 24 + c.d.textlength(p["injury"], font=font("bold", 20)) / S, y + 194, 18, fill=LOSS)
+        c.t(297, y + 176, p["injury"], font("bold", 20), "white", "lm")
+    else:
+        c.rr(285, y + 158, 385, y + 194, 18, fill=WIN)
+        c.t(335, y + 176, "Activo", font("bold", 20), "white", "mm")
+    c.paste(logo(tinfo, 90), W - 110, y + 70)
+
+    tiles = [(k, lbl) for k, lbl in (("PTS", "PUNTOS"), ("REB", "REBOTES"), ("AST", "ASIST."), ("FG%", "FG%"),
+                                    ("3P%", "3P%"), ("MIN", "MIN")) if avg.get(k)]
+    if tiles:
+        y = c.section(200, "PROMEDIOS DE TEMPORADA")
+        if avg.get("GP"):
+            c.t(W - 60, y - 32, f"{avg['GP']} juegos", font("semibold", 20), MUTED, "rm")
+        tw = (W - 120) / len(tiles)
+        for i, (k, lbl) in enumerate(tiles):
+            x0 = 60 + i * tw
+            c.rr(x0 + 6, y, x0 + tw - 6, y + 104, 16, fill="#F8FAFC", outline=LINE)
+            c.t(x0 + tw / 2, y + 44, avg[k], font("black", 38), col if i < 3 else INK, "mm")
+            c.t(x0 + tw / 2, y + 82, lbl, font("bold", 17), MUTED, "mm")
+
+    if rows:
+        cols = [("FECHA", 60, "lm"), ("RIVAL", 175, "lm"), ("RES", 330, "mm"), ("MIN", 470, "mm"), ("PTS", 570, "mm"),
+                ("REB", 660, "mm"), ("AST", 750, "mm"), ("FG", 865, "mm"), ("3PT", 975, "mm")]
+        y = c.section(70 + 40 + len(rows) * 54 + 10, "ÚLTIMOS 5 JUEGOS")
+        for lbl, x, an in cols:
+            c.t(x, y + 10, lbl, font("bold", 17), MUTED, an)
+        for i, r in enumerate(rows):
+            cy = y + 58 + i * 54
+            if i % 2 == 0:
+                c.rr(44, cy - 25, W - 44, cy + 25, 10, fill="#F8FAFC")
+            c.t(60, cy, r["date"], font("medium", 20), MUTED, "lm")
+            c.t(175, cy, f"{'vs' if r['atvs'] == 'vs' else '@'} {r['opp']}", font("bold", 22), INK, "lm")
+            chip = WIN if r["res"] == "W" else LOSS if r["res"] == "L" else GREY_BAR
+            c.rr(290, cy - 16, 370, cy + 16, 9, fill=chip)
+            c.t(330, cy, f"{r['res']} {r['score']}" if len(r["score"]) <= 7 else r["res"], font("black", 15), "white", "mm")
+            for key, x in (("MIN", 470), ("PTS", 570), ("REB", 660), ("AST", 750), ("FG", 865), ("3PT", 975)):
+                c.t(x, cy, r.get(key, "-"), font("black" if key == "PTS" else "semibold", 26 if key == "PTS" else 22),
+                    col if key == "PTS" else INK, "mm")
+        pts = [num(r.get("PTS")) for r in rows if num(r.get("PTS")) is not None]
+        if pts:
+            c.t(W - 60, y - 32, f"Prom. {sum(pts) / len(pts):.1f} PTS", font("semibold", 20), MUTED, "rm")
+
+    if props:
+        y = c.section(70 + len(props[:5]) * 44 + 10, "PROPS EN KALSHI")
+        for i, (txt, cents) in enumerate(props[:5]):
+            cy = y + 18 + i * 44
+            c.t(60, cy, fit(c.d, txt, font("semibold", 22), 780), font("semibold", 22), INK, "lm")
+            c.rr(W - 160, cy - 17, W - 60, cy + 17, 17, fill=col)
+            c.t(W - 110, cy, f"{cents}¢", font("black", 20), "white", "mm")
+
     c.footer()
     return c.png()

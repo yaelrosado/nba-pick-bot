@@ -46,11 +46,12 @@ _budget = {"left": MAX_POSTS_PER_RUN}
 
 
 # ------------------------------------------------------------- Helpers ----
-def get(path, params=None):
+def get(path, params=None, base=BASE):
     """
     <summary>GET a la API de ESPN (o a un archivo mock). Nunca lanza excepción.</summary>
     <param name="path">Ruta después de /sports, ej. "/basketball/nba/news".</param>
     <param name="params">Query params.</param>
+    <param name="base">URL base (BASE o la de site.web.api).</param>
     <returns>JSON (dict vacío si falla).</returns>
     """
     params = params or {}
@@ -63,7 +64,7 @@ def get(path, params=None):
             return {}
     for attempt in range(3):
         try:
-            r = requests.get(BASE + path, params=params, timeout=20)
+            r = requests.get(base + path, params=params, timeout=20)
             if r.ok:
                 return r.json()
             if r.status_code < 500 and r.status_code != 429:
@@ -474,16 +475,30 @@ def card_info(g, summ, state, h2h=None):
     <param name="h2h">Matchups anteriores (opcional).</param>
     <returns>Dict para la tarjeta.</returns>
     """
-    form = {}
+    import players  # aquí adentro para evitar import circular
+    form, last5, keyp, tleaders = {}, {}, {}, {}
     for t in (g["away"], g["home"]):
         f, _ = last_five(summ, t["id"])
         form[t["id"]] = (f.split() if f else [], team_streak(summ, t["id"]))
+        try:
+            last5[t["id"]] = players.last5_detail(summ, t)
+        except Exception as e:
+            print("Últimos 5 error:", t["abbr"], repr(e))
+        try:
+            tleaders[t["id"]] = players.team_leaders(t)
+        except Exception as e:
+            print("Líderes equipo error:", t["abbr"], repr(e))
+        try:
+            keyp[t["id"]] = players.key_players(summ, t)
+        except Exception as e:
+            print("Jugadores clave error:", t["abbr"], repr(e))
     start = g.get("start")
     when = "EN VIVO" if g.get("state") == "in" else (pr_time(start) if start else "")
     local = start.astimezone(TZ) if start else None
     return {"when": when, "sub": "Hora PR" + (f" · {g['broadcast']}" if g.get("broadcast") else ""),
             "date": f"{local.day} {MESES[local.month - 1]} {local.strftime('%Y')}" if local else "",
-            "kalshi": kalshi_prices(state, g), "odds": odds_line(summ, g), "h2h": h2h or [], "form": form}
+            "kalshi": kalshi_prices(state, g), "odds": odds_line(summ, g), "h2h": h2h or [], "form": form,
+            "last5": last5, "players": keyp, "team_leaders": tleaders}
 
 
 def caption(g, state, extra=""):
