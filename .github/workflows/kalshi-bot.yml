@@ -1,0 +1,49 @@
+# <summary>
+# Corre el bot casi en tiempo real: cada hora arranca un job que ejecuta el bot
+# cada ~2 minutos por 55 minutos y guarda state.json en el repo después de cada vuelta.
+# </summary>
+name: Kalshi NBA Bot
+
+on:
+  schedule:
+    - cron: "0 * * * *"     # arranca un turno cada hora
+  workflow_dispatch:         # botón "Run workflow" para correrlo a mano
+
+permissions:
+  contents: write
+
+concurrency:
+  group: kalshi-bot
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 62
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      POLL_SECONDS: "120"     # cada cuánto busca noticias/juegos
+      SHIFT_MINUTES: "55"     # cuánto dura cada turno
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Loop
+        run: |
+          git config user.name "kalshi-bot"
+          git config user.email "kalshi-bot@users.noreply.github.com"
+          end=$(( $(date +%s) + SHIFT_MINUTES * 60 ))
+          while [ "$(date +%s)" -lt "$end" ]; do
+            python bot.py || echo "corrida falló, sigo"
+            git add state.json
+            if ! git diff --cached --quiet; then
+              git commit -q -m "update state [skip ci]"
+              git pull -q --rebase -X theirs || true
+              git push -q || echo "push falló, sigo"
+            fi
+            sleep "$POLL_SECONDS"
+          done
