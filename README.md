@@ -8,6 +8,8 @@ Cada 30 minutos el bot edita un solo mensaje, el Live Board de Kalshi con los me
 
 La primera vez que corre, el bot no postea noticias ni finales viejos; solo los marca como vistos y desde ahí postea únicamente lo nuevo.
 
+Además, en Telegram la gente le puede hacer preguntas al bot con comandos, y el bot contesta en segundos con data real: `/hoy` da los juegos de hoy con hora en PR y precio en Kalshi, `/stats lakers` da las stats de temporada, la forma, los líderes y las lesiones de un equipo, `/juego celtics` da el preview completo del próximo juego con matchups anteriores, `/kalshi knicks` da los precios de Kalshi de ese equipo, `/picks` da los de alta probabilidad del momento y `/ayuda` da la lista. Los comandos funcionan mientras el bot está en su turno, que es casi todo el tiempo; si alguien escribe justo en el hueco entre turnos, el bot contesta apenas arranca el próximo.
+
 ## 1. Crear el bot de Telegram
 
 En Telegram, habla con @BotFather, envía `/newbot`, ponle nombre y copia el token que te da, que es tu `TELEGRAM_BOT_TOKEN`. Luego crea un canal (público o privado), entra a la configuración de administradores, añade tu bot como admin y dale permiso para postear, editar y fijar mensajes. Si el canal es público, el `TELEGRAM_CHAT_ID` es `@nombre_del_canal`. Si es privado, postea cualquier mensaje en el canal, abre `https://api.telegram.org/bot<TOKEN>/getUpdates` en el navegador y busca el `chat.id`, que empieza con `-100`. Si quieres un grupo para que la gente comente, ve a la configuración del canal, entra a Discussion y enlázale un grupo.

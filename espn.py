@@ -224,7 +224,7 @@ def team_info(c):
     <returns>Dict con id, name, short, abbr, location, logo, record, rank, score, leaders.</returns>
     """
     t = c.get("team") or {}
-    rec = next((r.get("summary") for r in c.get("records") or []
+    rec = next((r.get("summary") for r in c.get("records") or c.get("record") or []
                 if r.get("type") == "total" or (r.get("name") or "").lower() in ("overall", "all splits")), "")
     rank = (c.get("curatedRank") or {}).get("current") or 99
     return {"id": str(t.get("id") or c.get("id")), "name": t.get("displayName") or "", "short": t.get("shortDisplayName") or t.get("name") or "",
@@ -456,14 +456,14 @@ def run_previews(sport, lg, label, emoji, only_ranked, games, state, now):
         if not can_post():
             return
         summ = get(f"/{sport}/{lg}/summary", {"event": g["id"]})
-        post_preview(label, emoji, g, summ, head_to_head(sport, lg, g["home"], g["away"]), state, hrs)
+        notify.post(*build_preview(label, emoji, g, summ, head_to_head(sport, lg, g["home"], g["away"]), state, hrs))
         done.append(g["id"])
     state["previewed"] = done[-500:]
 
 
-def post_preview(label, emoji, g, summ, h2h, state, hrs):
+def build_preview(label, emoji, g, summ, h2h, state, hrs):
     """
-    <summary>Arma y publica la tarjeta de preview del juego.</summary>
+    <summary>Arma la tarjeta de preview del juego.</summary>
     <param name="label">Liga.</param>
     <param name="emoji">Emoji.</param>
     <param name="g">Juego.</param>
@@ -471,10 +471,20 @@ def post_preview(label, emoji, g, summ, h2h, state, hrs):
     <param name="h2h">Líneas de matchups anteriores.</param>
     <param name="state">Estado (para el precio de Kalshi).</param>
     <param name="hrs">Horas para el juego.</param>
+    <returns>(html de Telegram, payload de Discord).</returns>
     """
     h, a = g["home"], g["away"]
     rec = lambda t: f" ({t['record']})" if t["record"] else ""
-    when = f"🕖 {pr_time(g['start'])} (PR) · en {max(1, round(hrs * 60))}m" if hrs < 1 else f"🕖 {pr_time(g['start'])} (PR) · en {hrs:.0f}h"
+    if g.get("state") == "in":
+        when = f"🔴 En juego · {g.get('detail') or ''}".rstrip(" ·")
+    elif hrs <= 0:
+        when = f"🕖 {pr_time(g['start'])} (PR) · por empezar"
+    elif hrs < 1:
+        when = f"🕖 {pr_time(g['start'])} (PR) · en {max(1, round(hrs * 60))}m"
+    elif hrs < 24:
+        when = f"🕖 {pr_time(g['start'])} (PR) · en {hrs:.0f}h"
+    else:
+        when = f"🕖 {short_date(g['start'])} · {pr_time(g['start'])} (PR)"
     extra = " · ".join(x for x in (g.get("venue"), g.get("broadcast")) if x)
     kx, odds = kalshi_line(state, g), odds_line(summ, g)
     fa, la = last_five(summ, a["id"])
@@ -524,7 +534,7 @@ def post_preview(label, emoji, g, summ, h2h, state, hrs):
              "footer": {"text": "⚠️ No es consejo financiero · Data: ESPN + Kalshi"}}
     if h.get("logo"):
         embed["thumbnail"] = {"url": h["logo"]}
-    notify.post("\n".join(t), {"embeds": [embed]})
+    return "\n".join(t), {"embeds": [embed]}
 
 
 def run_finals(lg, label, emoji, only_ranked, games, state):
@@ -643,20 +653,21 @@ def run_slate(sport, lg, label, emoji, state, now):
     for g in games:
         try:
             summ = get(f"/{sport}/{lg}/summary", {"event": g["id"]})
-            post_team_card(label, emoji, g, summ, state)
+            notify.post(*build_team_card(label, emoji, g, summ, state))
             time.sleep(2)  # Telegram permite ~20 mensajes por minuto en un canal
         except Exception as e:
             print("Slate error:", g["id"], repr(e))
 
 
-def post_team_card(label, emoji, g, summ, state):
+def build_team_card(label, emoji, g, summ, state):
     """
-    <summary>Tarjeta de stats de los dos equipos de un juego de hoy.</summary>
+    <summary>Arma la tarjeta de stats de los dos equipos de un juego de hoy.</summary>
     <param name="label">Liga.</param>
     <param name="emoji">Emoji.</param>
     <param name="g">Juego.</param>
     <param name="summ">Summary de ESPN.</param>
     <param name="state">Estado (precio de Kalshi).</param>
+    <returns>(html de Telegram, payload de Discord).</returns>
     """
     a, h = g["away"], g["home"]
     kx = kalshi_line(state, g)
@@ -700,7 +711,7 @@ def post_team_card(label, emoji, g, summ, state):
              "fields": fields, "color": COLORS.get(label, 0x111827), "footer": {"text": "Data: ESPN + Kalshi"}}
     if h.get("logo"):
         embed["thumbnail"] = {"url": h["logo"]}
-    notify.post("\n".join(t), {"embeds": [embed]})
+    return "\n".join(t), {"embeds": [embed]}
 
 
 def run(state, now):
